@@ -36,10 +36,6 @@
  *
  */
 
-// Change EEPROM version if the structure changes
-#define EEPROM_VERSION "V70"
-#define EEPROM_OFFSET 100
-
 // Check the integrity of data offsets.
 // Can be disabled for production build.
 //#define DEBUG_EEPROM_READWRITE
@@ -55,6 +51,16 @@
 #include "../libs/vector_3.h"   // for matrix_3x3
 #include "../gcode/gcode.h"
 #include "../Marlin.h"
+
+// Change EEPROM version if the structure changes
+#if ENABLED(EEPROM_SETTINGS)
+#define EEPROM_VERSION "V71"
+#define EEPROM_OFFSET 100
+#endif
+
+#if ENABLED(USE_PRUSA_EEPROM_AS_SOURCE_OF_DEFAULT_VALUES)
+    #include "config_store/store_c_api.h"
+#endif // USE_PRUSA_EEPROM_AS_SOURCE_OF_DEFAULT_VALUES
 
 #if EITHER(EEPROM_SETTINGS, SD_FIRMWARE_UPDATE)
   #include "../HAL/shared/persistent_store_api.h"
@@ -114,6 +120,12 @@
   #include "../feature/tmc_util.h"
 #endif
 
+#include <option/has_phase_stepping.h>
+#if HAS_PHASE_STEPPING()
+  #include <option/has_burst_stepping.h>
+  void M970_report(bool eeprom);
+#endif
+
 #pragma pack(push, 1) // No padding between variables
 
 typedef struct { uint16_t X, Y, Z, X2, Y2, Z2, Z3, E0, E1, E2, E3, E4, E5; } tmc_stepper_current_t;
@@ -126,7 +138,25 @@ typedef struct {     bool X, Y, Z, X2, Y2, Z2, Z3, E0, E1, E2, E3, E4, E5; } tmc
 
 // Defaults for reset / fill in on load
 static const uint32_t   _DMA[] PROGMEM = DEFAULT_MAX_ACCELERATION;
-static const float     _DASU[] PROGMEM = DEFAULT_AXIS_STEPS_PER_UNIT;
+#if ENABLED(USE_PRUSA_EEPROM_AS_SOURCE_OF_DEFAULT_VALUES) 
+static float get_steps_per_unit(size_t index) {
+    switch (index) {
+    case 0:
+      return get_steps_per_unit_x();
+    case 1:
+      return get_steps_per_unit_y();
+    case 2:
+      return get_steps_per_unit_z();
+    }
+    //if index is bigger than max index, use max index - default marlin behavior
+    return get_steps_per_unit_e();
+}
+#else
+static constexpr float get_steps_per_unit(size_t index) {
+  constexpr float _DASU[] = DEFAULT_AXIS_STEPS_PER_UNIT;
+  return pgm_read_float(&_DASU[ALIM(index, _DASU)]);
+}
+#endif // USE_PRUSA_EEPROM_AS_SOURCE_OF_DEFAULT_VALUES
 static const feedRate_t _DMF[] PROGMEM = DEFAULT_MAX_FEEDRATE;
 
 /**
@@ -357,7 +387,7 @@ void MarlinSettings::postprocess() {
   xyze_pos_t oldpos = current_position;
 
   // steps per s2 needs to be updated to agree with units per s2
-  planner.reset_acceleration_rates();
+  planner.refresh_acceleration_rates();
 
   // Make sure delta kinematics are updated before refreshing the
   // planner position so the stepper counts will be set correctly.
@@ -402,7 +432,7 @@ void MarlinSettings::postprocess() {
     planner.recalculate_max_e_jerk();
   #endif
 
-  // Refresh steps_to_mm with the reciprocal of axis_steps_per_mm
+  // Refresh mm_per_step, mm_per_half_step and mm_per_mstep with the reciprocal of axis_steps_per_mm and axis_msteps_per_mm
   // and init stepper.count[], planner.position[] with current_position
   planner.refresh_positioning();
 
@@ -787,12 +817,8 @@ void MarlinSettings::postprocess() {
       }
 
       _FIELD_TEST(lpq_len);
-      #if ENABLED(PID_EXTRUSION_SCALING)
-        EEPROM_WRITE(thermalManager.lpq_len);
-      #else
-        const int16_t lpq_len = 20;
-        EEPROM_WRITE(lpq_len);
-      #endif
+      const int16_t lpq_len = 20;
+      EEPROM_WRITE(lpq_len);
     }
 
     //
@@ -1035,16 +1061,16 @@ void MarlinSettings::postprocess() {
       tmc_sgt_t tmc_sgt{0};
       #if USE_SENSORLESS
         #if X_SENSORLESS
-          tmc_sgt.X = stepperX.homing_threshold();
+          tmc_sgt.X = stepperX.stall_sensitivity();
         #endif
         #if X2_SENSORLESS
-          tmc_sgt.X2 = stepperX2.homing_threshold();
+          tmc_sgt.X2 = stepperX2.stall_sensitivity();
         #endif
         #if Y_SENSORLESS
-          tmc_sgt.Y = stepperY.homing_threshold();
+          tmc_sgt.Y = stepperY.stall_sensitivity();
         #endif
         #if Z_SENSORLESS
-          tmc_sgt.Z = stepperZ.homing_threshold();
+          tmc_sgt.Z = stepperZ.stall_sensitivity();
         #endif
       #endif
       EEPROM_WRITE(tmc_sgt);
@@ -1304,7 +1330,8 @@ void MarlinSettings::postprocess() {
         if (!validating) LOOP_XYZE_N(i) {
           const bool in = (i < esteppers + XYZ);
           planner.settings.max_acceleration_mm_per_s2[i] = in ? tmp1[i] : pgm_read_dword(&_DMA[ALIM(i, _DMA)]);
-          planner.settings.axis_steps_per_mm[i]          = in ? tmp2[i] : pgm_read_float(&_DASU[ALIM(i, _DASU)]);
+          planner.settings.axis_steps_per_mm[i]          = in ? tmp2[i] : get_steps_per_unit(i);
+          planner.settings.axis_msteps_per_mm[i]         = (in ? tmp2[i] : get_steps_per_unit(i)) * PLANNER_STEPS_MULTIPLIER;
           planner.settings.max_feedrate_mm_s[i]          = in ? tmp3[i] : pgm_read_float(&_DMF[ALIM(i, _DMF)]);
         }
 
@@ -1595,12 +1622,8 @@ void MarlinSettings::postprocess() {
       //
       {
         _FIELD_TEST(lpq_len);
-        #if ENABLED(PID_EXTRUSION_SCALING)
-          EEPROM_READ(thermalManager.lpq_len);
-        #else
-          int16_t lpq_len;
-          EEPROM_READ(lpq_len);
-        #endif
+        int16_t lpq_len;
+        EEPROM_READ(lpq_len);
       }
 
       //
@@ -1817,32 +1840,32 @@ void MarlinSettings::postprocess() {
           if (!validating) {
             #ifdef X_STALL_SENSITIVITY
               #if AXIS_HAS_STALLGUARD(X)
-                stepperX.homing_threshold(tmc_sgt.X);
+                stepperX.stall_sensitivity(tmc_sgt.X);
               #endif
               #if AXIS_HAS_STALLGUARD(X2) && !X2_SENSORLESS
-                stepperX2.homing_threshold(tmc_sgt.X);
+                stepperX2.stall_sensitivity(tmc_sgt.X);
               #endif
             #endif
             #if X2_SENSORLESS
-              stepperX2.homing_threshold(tmc_sgt.X2);
+              stepperX2.stall_sensitivity(tmc_sgt.X2);
             #endif
             #ifdef Y_STALL_SENSITIVITY
               #if AXIS_HAS_STALLGUARD(Y)
-                stepperY.homing_threshold(tmc_sgt.Y);
+                stepperY.stall_sensitivity(tmc_sgt.Y);
               #endif
               #if AXIS_HAS_STALLGUARD(Y2)
-                stepperY2.homing_threshold(tmc_sgt.Y);
+                stepperY2.stall_sensitivity(tmc_sgt.Y);
               #endif
             #endif
             #ifdef Z_STALL_SENSITIVITY
               #if AXIS_HAS_STALLGUARD(Z)
-                stepperZ.homing_threshold(tmc_sgt.Z);
+                stepperZ.stall_sensitivity(tmc_sgt.Z);
               #endif
               #if AXIS_HAS_STALLGUARD(Z2)
-                stepperZ2.homing_threshold(tmc_sgt.Z);
+                stepperZ2.stall_sensitivity(tmc_sgt.Z);
               #endif
               #if AXIS_HAS_STALLGUARD(Z3)
-                stepperZ3.homing_threshold(tmc_sgt.Z);
+                stepperZ3.stall_sensitivity(tmc_sgt.Z);
               #endif
             #endif
           }
@@ -2203,21 +2226,24 @@ void MarlinSettings::postprocess() {
 #endif // !EEPROM_SETTINGS
 
 /**
- * M502 - Reset Configuration
+ * Resets motion parameters only (speed, accel., etc.)
  */
-void MarlinSettings::reset() {
+void MarlinSettings::reset_motion() {
+  auto s = planner.user_settings;
+
   LOOP_XYZE_N(i) {
-    planner.settings.max_acceleration_mm_per_s2[i] = pgm_read_dword(&_DMA[ALIM(i, _DMA)]);
-    planner.settings.axis_steps_per_mm[i]          = pgm_read_float(&_DASU[ALIM(i, _DASU)]);
-    planner.settings.max_feedrate_mm_s[i]          = pgm_read_float(&_DMF[ALIM(i, _DMF)]);
+    s.max_acceleration_mm_per_s2[i] = pgm_read_dword(&_DMA[ALIM(i, _DMA)]);
+    s.axis_steps_per_mm[i]          = get_steps_per_unit(i);
+    s.axis_msteps_per_mm[i]         = get_steps_per_unit(i) * PLANNER_STEPS_MULTIPLIER;
+    s.max_feedrate_mm_s[i]          = pgm_read_float(&_DMF[ALIM(i, _DMF)]);
   }
 
-  planner.settings.min_segment_time_us = DEFAULT_MINSEGMENTTIME;
-  planner.settings.acceleration = DEFAULT_ACCELERATION;
-  planner.settings.retract_acceleration = DEFAULT_RETRACT_ACCELERATION;
-  planner.settings.travel_acceleration = DEFAULT_TRAVEL_ACCELERATION;
-  planner.settings.min_feedrate_mm_s = feedRate_t(DEFAULT_MINIMUMFEEDRATE);
-  planner.settings.min_travel_feedrate_mm_s = feedRate_t(DEFAULT_MINTRAVELFEEDRATE);
+  s.min_segment_time_us = DEFAULT_MINSEGMENTTIME;
+  s.acceleration = DEFAULT_ACCELERATION;
+  s.retract_acceleration = DEFAULT_RETRACT_ACCELERATION;
+  s.travel_acceleration = DEFAULT_TRAVEL_ACCELERATION;
+  s.min_feedrate_mm_s = feedRate_t(DEFAULT_MINIMUMFEEDRATE);
+  s.min_travel_feedrate_mm_s = feedRate_t(DEFAULT_MINTRAVELFEEDRATE);
 
   #if HAS_CLASSIC_JERK
     #ifndef DEFAULT_XJERK
@@ -2229,15 +2255,24 @@ void MarlinSettings::reset() {
     #ifndef DEFAULT_ZJERK
       #define DEFAULT_ZJERK 0
     #endif
-    planner.max_jerk.set(DEFAULT_XJERK, DEFAULT_YJERK, DEFAULT_ZJERK);
+    s.max_jerk.set(DEFAULT_XJERK, DEFAULT_YJERK, DEFAULT_ZJERK);
     #if HAS_CLASSIC_E_JERK
-      planner.max_jerk.e = DEFAULT_EJERK;
+      s.max_jerk.e = DEFAULT_EJERK;
     #endif
   #endif
 
   #if DISABLED(CLASSIC_JERK)
     planner.junction_deviation_mm = float(JUNCTION_DEVIATION_MM);
   #endif
+
+  planner.apply_settings(s);
+}
+
+/**
+ * M502 - Reset Configuration
+ */
+void MarlinSettings::reset() {
+  reset_motion();
 
   #if HAS_SCARA_OFFSET
     scara_home_offset.reset();
@@ -2429,10 +2464,6 @@ void MarlinSettings::reset() {
   // PID Extrusion Scaling
   //
 
-  #if ENABLED(PID_EXTRUSION_SCALING)
-    thermalManager.lpq_len = 20;  // Default last-position-queue size
-  #endif
-
   //
   // Heated Bed PID
   //
@@ -2441,6 +2472,14 @@ void MarlinSettings::reset() {
     thermalManager.temp_bed.pid.Kp = DEFAULT_bedKp;
     thermalManager.temp_bed.pid.Ki = scalePID_i(DEFAULT_bedKi);
     thermalManager.temp_bed.pid.Kd = scalePID_d(DEFAULT_bedKd);
+  #endif
+
+  #if ENABLED(PIDTEMPHEATBREAK)
+    HOTEND_LOOP() {
+      thermalManager.temp_heatbreak[e].pid.Kp = DEFAULT_heatbreakKp;
+      thermalManager.temp_heatbreak[e].pid.Ki = scalePID_i(DEFAULT_heatbreakKi);
+      thermalManager.temp_heatbreak[e].pid.Kd = scalePID_d(DEFAULT_heatbreakKd);
+    }
   #endif
 
   //
@@ -2764,11 +2803,11 @@ void MarlinSettings::reset() {
         , " J", LINEAR_UNIT(planner.junction_deviation_mm)
       #endif
       #if HAS_CLASSIC_JERK
-        , " X", LINEAR_UNIT(planner.max_jerk.x)
-        , " Y", LINEAR_UNIT(planner.max_jerk.y)
-        , " Z", LINEAR_UNIT(planner.max_jerk.z)
+        , " X", LINEAR_UNIT(planner.settings.max_jerk.x)
+        , " Y", LINEAR_UNIT(planner.settings.max_jerk.y)
+        , " Z", LINEAR_UNIT(planner.settings.max_jerk.z)
         #if HAS_CLASSIC_E_JERK
-          , " E", LINEAR_UNIT(planner.max_jerk.e)
+          , " E", LINEAR_UNIT(planner.settings.max_jerk.e)
         #endif
       #endif
     );
@@ -2845,8 +2884,10 @@ void MarlinSettings::reset() {
         if (!forReplay) {
           SERIAL_EOL();
           ubl.report_state();
-          SERIAL_ECHOLNPAIR("\nActive Mesh Slot: ", ubl.storage_slot);
-          SERIAL_ECHOLNPAIR("EEPROM can hold ", calc_num_meshes(), " meshes.\n");
+          #if ENABLED(EEPROM_SETTINGS)
+            SERIAL_ECHOLNPAIR("\nActive Mesh Slot: ", ubl.storage_slot);
+            SERIAL_ECHOLNPAIR("EEPROM can hold ", calc_num_meshes(), " meshes.\n");
+          #endif
         }
 
        //ubl.report_current_mesh();   // This is too verbose for large meshes. A better (more terse)
@@ -2978,7 +3019,6 @@ void MarlinSettings::reset() {
           );
           #if ENABLED(PID_EXTRUSION_SCALING)
             SERIAL_ECHOPAIR(" C", PID_PARAM(Kc, e));
-            if (e == 0) SERIAL_ECHOPAIR(" L", thermalManager.lpq_len);
           #endif
           SERIAL_EOL();
         }
@@ -3220,13 +3260,13 @@ void MarlinSettings::reset() {
           CONFIG_ECHO_START();
           say_M914();
           #if X_SENSORLESS
-            SERIAL_ECHOPAIR(" X", stepperX.homing_threshold());
+            SERIAL_ECHOPAIR(" X", stepperX.stall_sensitivity());
           #endif
           #if Y_SENSORLESS
-            SERIAL_ECHOPAIR(" Y", stepperY.homing_threshold());
+            SERIAL_ECHOPAIR(" Y", stepperY.stall_sensitivity());
           #endif
           #if Z_SENSORLESS
-            SERIAL_ECHOPAIR(" Z", stepperZ.homing_threshold());
+            SERIAL_ECHOPAIR(" Z", stepperZ.stall_sensitivity());
           #endif
           SERIAL_EOL();
         #endif
@@ -3236,13 +3276,13 @@ void MarlinSettings::reset() {
           say_M914();
           SERIAL_ECHOPGM(" I1");
           #if X2_SENSORLESS
-            SERIAL_ECHOPAIR(" X", stepperX2.homing_threshold());
+            SERIAL_ECHOPAIR(" X", stepperX2.stall_sensitivity());
           #endif
           #if Y2_SENSORLESS
-            SERIAL_ECHOPAIR(" Y", stepperY2.homing_threshold());
+            SERIAL_ECHOPAIR(" Y", stepperY2.stall_sensitivity());
           #endif
           #if Z2_SENSORLESS
-            SERIAL_ECHOPAIR(" Z", stepperZ2.homing_threshold());
+            SERIAL_ECHOPAIR(" Z", stepperZ2.stall_sensitivity());
           #endif
           SERIAL_EOL();
         #endif
@@ -3250,7 +3290,7 @@ void MarlinSettings::reset() {
         #if Z3_SENSORLESS
           CONFIG_ECHO_START();
           say_M914();
-          SERIAL_ECHOLNPAIR(" I2 Z", stepperZ3.homing_threshold());
+          SERIAL_ECHOLNPAIR(" I2 Z", stepperZ3.stall_sensitivity());
         #endif
 
       #endif // USE_SENSORLESS
@@ -3415,6 +3455,17 @@ void MarlinSettings::reset() {
           , " D", LINEAR_UNIT(runout.runout_distance())
         #endif
       );
+    #endif
+
+    #if HAS_PHASE_STEPPING()
+      #if HAS_BURST_STEPPING()
+        CONFIG_ECHO_HEADING("Phase stepping (burst):");
+      #else
+        CONFIG_ECHO_HEADING("Phase stepping:");
+      #endif
+      CONFIG_ECHO_START();
+      SERIAL_ECHO("  ");
+      M970_report(true);
     #endif
   }
 

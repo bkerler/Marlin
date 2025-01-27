@@ -90,6 +90,10 @@
   #include "../../feature/bedlevel/bedlevel.h"
 #endif
 
+#if ENABLED(CRASH_RECOVERY)
+  #include "../../feature/prusa/crash_recovery.hpp"
+#endif
+
 #if HAS_FILAMENT_SENSOR
   #include "../../feature/runout.h"
 #endif
@@ -323,14 +327,14 @@ namespace ExtUI {
 
   float getAxisPosition_mm(const extruder_t extruder) {
     const extruder_t old_tool = getActiveTool();
-    setActiveTool(extruder, true);
+    setActiveTool(extruder);
     const float epos = (
       #if ENABLED(JOYSTICK)
         flags.jogging ? destination.e :
       #endif
       current_position.e
     );
-    setActiveTool(old_tool, true);
+    setActiveTool(old_tool);
     return epos;
   }
 
@@ -383,20 +387,19 @@ namespace ExtUI {
   }
 
   void setAxisPosition_mm(const float position, const extruder_t extruder) {
-    setActiveTool(extruder, true);
+    setActiveTool(extruder);
 
     current_position.e = position;
     line_to_current_position(MMM_TO_MMS(manual_feedrate_mm_m.e));
   }
 
-  void setActiveTool(const extruder_t extruder, bool no_move) {
+  void setActiveTool(const extruder_t extruder) {
     #if EXTRUDERS > 1
       const uint8_t e = extruder - E0;
-      if (e != active_extruder) tool_change(e, no_move);
+      if (e != active_extruder) tool_change(e, tool_return_t::no_return);
       active_extruder = e;
     #else
       UNUSED(extruder);
-      UNUSED(no_move);
     #endif
   }
 
@@ -517,13 +520,13 @@ namespace ExtUI {
     int getTMCBumpSensitivity(const axis_t axis) {
       switch (axis) {
         #if X_SENSORLESS
-          case X: return stepperX.homing_threshold();
+          case X: return stepperX.stall_sensitivity();
         #endif
         #if Y_SENSORLESS
-          case Y: return stepperY.homing_threshold();
+          case Y: return stepperY.stall_sensitivity();
         #endif
         #if Z_SENSORLESS
-          case Z: return stepperZ.homing_threshold();
+          case Z: return stepperZ.stall_sensitivity();
         #endif
         default: return 0;
       }
@@ -533,13 +536,25 @@ namespace ExtUI {
       switch (axis) {
         #if X_SENSORLESS || Y_SENSORLESS || Z_SENSORLESS
           #if X_SENSORLESS
-            case X: stepperX.homing_threshold(value); break;
+            #if ENABLED(CRASH_RECOVERY)
+              case X: crash_s.home_sensitivity[0] = value; break;
+            #else
+              case X: stepperX.stall_sensitivity(value); break;
+            #endif
           #endif
           #if Y_SENSORLESS
-            case Y: stepperY.homing_threshold(value); break;
+            #if ENABLED(CRASH_RECOVERY)
+              case Y: crash_s.home_sensitivity[1] = value; break;
+            #else
+              case Y: stepperY.stall_sensitivity(value); break;
+            #endif
           #endif
           #if Z_SENSORLESS
-            case Z: stepperZ.homing_threshold(value); break;
+            #if ENABLED(CRASH_RECOVERY)
+              case Z: crash_s.home_sensitivity[2] = value; break;
+            #else
+              case Z: stepperZ.stall_sensitivity(value); break;
+            #endif
           #endif
         #else
           UNUSED(value);
@@ -559,12 +574,18 @@ namespace ExtUI {
   }
 
   void setAxisSteps_per_mm(const float value, const axis_t axis) {
-    planner.settings.axis_steps_per_mm[axis] = value;
+    auto s = planner.user_settings;
+    s.axis_steps_per_mm[axis] = value;
+    s.axis_msteps_per_mm[axis] = value * PLANNER_STEPS_MULTIPLIER;
+    planner.apply_settings(s);
   }
 
   void setAxisSteps_per_mm(const float value, const extruder_t extruder) {
     UNUSED_E(extruder);
-    planner.settings.axis_steps_per_mm[E_AXIS_N(axis - E0)] = value;
+    auto s = planner.user_settings;
+    s.axis_steps_per_mm[E_AXIS_N(axis - E0)] = value;
+    s.axis_msteps_per_mm[E_AXIS_N(axis - E0)] = value * PLANNER_STEPS_MULTIPLIER;
+    planner.apply_settings(s);
   }
 
   feedRate_t getAxisMaxFeedrate_mm_s(const axis_t axis) {
@@ -638,11 +659,11 @@ namespace ExtUI {
   #else
 
     float getAxisMaxJerk_mm_s(const axis_t axis) {
-      return planner.max_jerk[axis];
+      return planner.settings.max_jerk[axis];
     }
 
     float getAxisMaxJerk_mm_s(const extruder_t) {
-      return planner.max_jerk.e;
+      return planner.settings.max_jerk.e;
     }
 
     void setAxisMaxJerk_mm_s(const float value, const axis_t axis) {
@@ -661,11 +682,31 @@ namespace ExtUI {
   float getRetractAcceleration_mm_s2()                { return planner.settings.retract_acceleration; }
   float getTravelAcceleration_mm_s2()                 { return planner.settings.travel_acceleration; }
   void setFeedrate_mm_s(const feedRate_t fr)          { feedrate_mm_s = fr; }
-  void setMinFeedrate_mm_s(const feedRate_t fr)       { planner.settings.min_feedrate_mm_s = fr; }
-  void setMinTravelFeedrate_mm_s(const feedRate_t fr) { planner.settings.min_travel_feedrate_mm_s = fr; }
-  void setPrintingAcceleration_mm_s2(const float acc) { planner.settings.acceleration = acc; }
-  void setRetractAcceleration_mm_s2(const float acc)  { planner.settings.retract_acceleration = acc; }
-  void setTravelAcceleration_mm_s2(const float acc)   { planner.settings.travel_acceleration = acc; }
+  void setMinFeedrate_mm_s(const feedRate_t fr)       {
+    auto s = planner.user_settings;
+    s.min_feedrate_mm_s = fr;
+    planner.apply_settings(s);
+  }
+  void setMinTravelFeedrate_mm_s(const feedRate_t fr) {
+    auto s = planner.user_settings;
+    s.min_travel_feedrate_mm_s = fr;
+    planner.apply_settings(s);
+  }
+  void setPrintingAcceleration_mm_s2(const float acc) {
+    auto s = planner.user_settings;
+    s.acceleration = acc;
+    planner.apply_settings(s);
+  }
+  void setRetractAcceleration_mm_s2(const float acc)  {
+    auto s = planner.user_settings;
+    s.retract_acceleration = acc;
+    planner.apply_settings(s);
+  }
+  void setTravelAcceleration_mm_s2(const float acc)   {
+    auto s = planner.user_settings;
+    s.travel_acceleration = acc;
+    planner.apply_settings(s);
+  }
 
   #if ENABLED(BABYSTEPPING)
     bool babystepAxis_steps(const int16_t steps, const axis_t axis) {
@@ -690,7 +731,7 @@ namespace ExtUI {
      * what nozzle is printing.
      */
     void smartAdjustAxis_steps(const int16_t steps, const axis_t axis, bool linked_nozzles) {
-      const float mm = steps * planner.steps_to_mm[axis];
+      const float mm = steps * planner.mm_per_step[axis];
 
       if (!babystepAxis_steps(steps, axis)) return;
 
@@ -731,7 +772,7 @@ namespace ExtUI {
      * steps that is at least mm long.
      */
     int16_t mmToWholeSteps(const float mm, const axis_t axis) {
-      const float steps = mm / planner.steps_to_mm[axis];
+      const float steps = mm / planner.mm_per_step[axis];
       return steps > 0 ? ceil(steps) : floor(steps);
     }
   #endif
@@ -844,7 +885,7 @@ namespace ExtUI {
     queue.inject_P(gcode);
   }
 
-  bool commandsInQueue() { return (planner.movesplanned() || queue.has_commands_queued()); }
+  bool commandsInQueue() { return (queue.has_commands_queued() || planner.processing()); }
 
   bool isAxisPositionKnown(const axis_t axis) {
     return TEST(axis_known_position, axis);
@@ -866,14 +907,14 @@ namespace ExtUI {
     enableHeater(heater);
     #if HAS_HEATED_BED
       if (heater == BED)
-        thermalManager.setTargetBed(constrain(value, 0, BED_MAXTEMP - 10));
+        thermalManager.setTargetBed(constrain(value, 0, BED_MAXTEMP - BED_MAXTEMP_SAFETY_MARGIN));
       else
     #endif
       {
         #if HOTENDS
           static constexpr int16_t heater_maxtemp[HOTENDS] = ARRAY_BY_HOTENDS(HEATER_0_MAXTEMP, HEATER_1_MAXTEMP, HEATER_2_MAXTEMP, HEATER_3_MAXTEMP, HEATER_4_MAXTEMP, HEATER_5_MAXTEMP);
           const int16_t e = heater - H0;
-          thermalManager.setTargetHotend(constrain(value, 0, heater_maxtemp[e] - 15), e);
+          thermalManager.setTargetHotend(constrain(value, 0, heater_maxtemp[e] - HEATER_MAXTEMP_SAFETY_MARGIN), e);
         #endif
       }
   }
@@ -883,7 +924,7 @@ namespace ExtUI {
       constexpr int16_t heater_maxtemp[HOTENDS] = ARRAY_BY_HOTENDS(HEATER_0_MAXTEMP, HEATER_1_MAXTEMP, HEATER_2_MAXTEMP, HEATER_3_MAXTEMP, HEATER_4_MAXTEMP, HEATER_5_MAXTEMP);
       const int16_t e = extruder - E0;
       enableHeater(extruder);
-      thermalManager.setTargetHotend(constrain(value, 0, heater_maxtemp[e] - 15), e);
+      thermalManager.setTargetHotend(constrain(value, 0, heater_maxtemp[e] - HEATER_MAXTEMP_SAFETY_MARGIN), e);
     #endif
   }
 
@@ -920,7 +961,7 @@ namespace ExtUI {
   }
 
   bool isPrinting() {
-    return (planner.movesplanned() || isPrintingFromMedia() || IFSD(IS_SD_PRINTING(), false));
+    return (planner.processing() || isPrintingFromMedia() || IFSD(IS_SD_PRINTING(), false));
   }
 
   bool isMediaInserted() {

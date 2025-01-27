@@ -352,7 +352,7 @@ bool unload_filament(const float &unload_length, const bool show_lcd/*=false*/,
 
   // Quickly purge
   do_pause_e_move((FILAMENT_UNLOAD_RETRACT_LENGTH + FILAMENT_UNLOAD_PURGE_LENGTH) * mix_multiplier,
-                  planner.settings.max_feedrate_mm_s[E_AXIS] * mix_multiplier);
+    FILAMENT_UNLOAD_PURGE_FEEDRATE * mix_multiplier);
 
   // Unload filament
   #if FILAMENT_CHANGE_UNLOAD_ACCEL > 0
@@ -360,7 +360,14 @@ bool unload_filament(const float &unload_length, const bool show_lcd/*=false*/,
     planner.settings.retract_acceleration = FILAMENT_CHANGE_UNLOAD_ACCEL;
   #endif
 
-  do_pause_e_move(unload_length * mix_multiplier, (FILAMENT_CHANGE_UNLOAD_FEEDRATE) * mix_multiplier);
+  if (unload_length < -(FILAMENT_UNLOAD_PHASE1_LENGHT + FILAMENT_UNLOAD_PHASE2_LENGHT))
+  {
+    do_pause_e_move(-FILAMENT_UNLOAD_PHASE1_LENGHT * mix_multiplier, (FILAMENT_CHANGE_UNLOAD_FEEDRATE) * mix_multiplier);
+    do_pause_e_move(-FILAMENT_UNLOAD_PHASE2_LENGHT * mix_multiplier, (FILAMENT_CHANGE_UNLOAD_FEEDRATE / 4) * mix_multiplier);
+    do_pause_e_move((unload_length + (FILAMENT_UNLOAD_PHASE1_LENGHT + FILAMENT_UNLOAD_PHASE2_LENGHT)) * mix_multiplier, (FILAMENT_CHANGE_UNLOAD_FEEDRATE) * mix_multiplier);
+  }
+  else
+    do_pause_e_move(unload_length * mix_multiplier, (FILAMENT_CHANGE_UNLOAD_FEEDRATE) * mix_multiplier);
 
   #if FILAMENT_CHANGE_FAST_LOAD_ACCEL > 0
     planner.settings.retract_acceleration = saved_acceleration;

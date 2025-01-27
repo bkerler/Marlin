@@ -27,6 +27,10 @@
 #include "../gcode.h"
 #include "../../module/temperature.h"
 
+/** \addtogroup G-Codes
+ * @{
+ */
+
 /**
  * M301: Set PID parameters P I D (and optionally C, L)
  *
@@ -51,9 +55,6 @@ void GcodeSuite::M301() {
     if (parser.seen('D')) PID_PARAM(Kd, e) = scalePID_d(parser.value_float());
     #if ENABLED(PID_EXTRUSION_SCALING)
       if (parser.seen('C')) PID_PARAM(Kc, e) = parser.value_float();
-      if (parser.seenval('L')) thermalManager.lpq_len = parser.value_int();
-      NOMORE(thermalManager.lpq_len, LPQ_MAX_LEN);
-      NOLESS(thermalManager.lpq_len, 0);
     #endif
 
     thermalManager.updatePID();
@@ -73,5 +74,7 @@ void GcodeSuite::M301() {
   else
     SERIAL_ERROR_MSG(MSG_INVALID_EXTRUDER);
 }
+
+/** @}*/
 
 #endif // PIDTEMP

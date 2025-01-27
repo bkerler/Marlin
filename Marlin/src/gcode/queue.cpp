@@ -34,6 +34,7 @@ GCodeQueue queue;
 #include "../module/planner.h"
 #include "../module/temperature.h"
 #include "../Marlin.h"
+#include "serial_printing.hpp"
 
 #if ENABLED(PRINTER_EVENT_LEDS)
   #include "../feature/leds/printer_event_leds.h"
@@ -68,6 +69,10 @@ uint8_t GCodeQueue::length = 0,  // Count of commands in the queue
         GCodeQueue::index_w = 0; // Ring buffer write position
 
 char GCodeQueue::command_buffer[BUFSIZE][MAX_CMD_SIZE];
+
+uint32_t GCodeQueue::sdpos = GCodeQueue::SDPOS_INVALID;
+uint32_t GCodeQueue::sdpos_buffer[BUFSIZE];
+bool GCodeQueue::pause_serial_commands = false;
 
 /*
  * The port that the command was received on
@@ -108,6 +113,7 @@ bool GCodeQueue::has_commands_queued() {
  * Clear the Marlin command queue
  */
 void GCodeQueue::clear() {
+  sdpos = get_current_sdpos();
   index_r = index_w = length = 0;
 }
 
@@ -126,6 +132,8 @@ void GCodeQueue::_commit_command(bool say_ok
   #if ENABLED(POWER_LOSS_RECOVERY)
     recovery.commit_sdpos(index_w);
   #endif
+  sdpos_buffer[index_w] = sdpos;
+
   if (++index_w >= BUFSIZE) index_w = 0;
   length++;
 }
@@ -154,17 +162,19 @@ bool GCodeQueue::_enqueue(const char* cmd, bool say_ok/*=false*/
  * Enqueue with Serial Echo
  * Return true if the command was consumed
  */
-bool GCodeQueue::enqueue_one(const char* cmd) {
+bool GCodeQueue::enqueue_one(const char* cmd, bool echo/*=true*/) {
 
   //SERIAL_ECHOPGM("enqueue_one(\"");
   //SERIAL_ECHO(cmd);
   //SERIAL_ECHOPGM("\") \n");
 
-  if (*cmd == 0 || *cmd == '\n' || *cmd == '\r') return true;
+  if (*cmd == 0 || *cmd == '\n' || *cmd == '\r' || *cmd == ';') return true;
 
   if (_enqueue(cmd)) {
-    SERIAL_ECHO_START();
-    SERIAL_ECHOLNPAIR(MSG_ENQUEUEING, cmd, "\"");
+    if (echo) {
+        SERIAL_ECHO_START();
+        SERIAL_ECHOLNPAIR(MSG_ENQUEUEING, cmd, "\"");
+    }
     return true;
   }
   return false;
@@ -209,7 +219,7 @@ void GCodeQueue::inject_P(PGM_P const pgcode) { injected_commands_P = pgcode; }
  * Enqueue and return only when commands are actually enqueued.
  * Never call this from a G-code handler!
  */
-void GCodeQueue::enqueue_one_now(const char* cmd) { while (!enqueue_one(cmd)) idle(); }
+void GCodeQueue::enqueue_one_now(const char* cmd) { while (!enqueue_one(cmd)) idle(true); }
 
 /**
  * Enqueue from program memory and return only when commands are actually enqueued
@@ -440,13 +450,16 @@ void GCodeQueue::get_serial_commands() {
               wait_for_user = false;
             #endif
           }
-          if (strcmp(command, "M112") == 0) kill();
+          if (strcmp(command, "M112") == 0) kill(PSTR("Emergency stop (M112)"), nullptr, true);
           if (strcmp(command, "M410") == 0) quickstop_stepper();
         #endif
 
         #if defined(NO_TIMEOUTS) && NO_TIMEOUTS > 0
           last_command_time = ms;
         #endif
+
+        // notify serial printing about command
+        SerialPrinting::serial_command_hook(command);
 
         // Add the command to the queue
         _enqueue(serial_line_buffer[i], true
@@ -599,7 +612,8 @@ void GCodeQueue::get_serial_commands() {
  */
 void GCodeQueue::get_available_commands() {
 
-  get_serial_commands();
+  if (!pause_serial_commands)
+    get_serial_commands();
 
   #if ENABLED(SDSUPPORT)
     get_sdcard_commands();
@@ -615,7 +629,10 @@ void GCodeQueue::advance() {
   if (process_injected_command()) return;
 
   // Return if the G-code buffer is empty
-  if (!length) return;
+  if (!length) {
+    delay(1);
+    return;
+  }
 
   #if ENABLED(SDSUPPORT)
 

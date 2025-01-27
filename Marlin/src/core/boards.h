@@ -189,6 +189,14 @@
 #define BOARD_5DPRINT                 1707  // 5DPrint D8 Driver Board
 
 //
+// Prusa Research
+//
+
+#define BOARD_BUDDY_2209_02           1823  // Prusa Buddy (STM32F407VET6, TMC2209, rev02)
+#define BOARD_XLBUDDY_V1              1824  // Prusa XLBuddy
+#define BOARD_DWARF_V1                1825  // Prusa Dwarf
+
+//
 // LPC1768 ARM Cortex M3
 //
 

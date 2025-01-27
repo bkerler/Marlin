@@ -45,6 +45,10 @@
   #include "../../feature/host_actions.h"
 #endif
 
+/** \addtogroup G-Codes
+ * @{
+ */
+
 /**
  * M0: Unconditional stop - Wait for user button press on LCD
  * M1: Conditional stop   - Wait for user button press on LCD
@@ -106,10 +110,10 @@ void GcodeSuite::M0_M1() {
 
   if (ms > 0) {
     ms += millis();  // wait until this time for a click
-    while (PENDING(millis(), ms) && wait_for_user) idle();
+    while (PENDING(millis(), ms) && wait_for_user) idle(true);
   }
   else
-    while (wait_for_user) idle();
+    while (wait_for_user) idle(true);
 
   #if HAS_LEDS_OFF_FLAG
     printerEventLEDs.onResumeAfterWait();
@@ -121,5 +125,7 @@ void GcodeSuite::M0_M1() {
 
   wait_for_user = false;
 }
+
+/** @}*/
 
 #endif // HAS_RESUME_CONTINUE

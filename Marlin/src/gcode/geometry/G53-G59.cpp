@@ -23,6 +23,8 @@
 #include "../gcode.h"
 #include "../../module/motion.h"
 
+#include <config_store/store_instance.hpp>
+
 #if ENABLED(CNC_COORDINATE_SYSTEMS)
 
 #include "../../module/stepper.h"
@@ -39,6 +41,15 @@ bool GcodeSuite::select_coordinate_system(const int8_t _new) {
   xyz_float_t new_offset{0};
   if (WITHIN(_new, 0, MAX_COORDINATE_SYSTEMS - 1))
     new_offset = coordinate_system[_new];
+
+    #ifdef Z_SHIFTED_COOR_SYS //Load Z axis size to workspace offset
+      if(_new == Z_SHIFTED_COOR_SYS){
+        float Z_size =  config_store().axis_z_max_pos_mm.get();
+        new_offset[Z_AXIS] = -Z_size;
+        SERIAL_ECHOLNPAIR("Load Z axis size ", Z_size);
+      }
+    #endif
+
   LOOP_XYZ(i) {
     if (position_shift[i] != new_offset[i]) {
       position_shift[i] = new_offset[i];
@@ -48,8 +59,20 @@ bool GcodeSuite::select_coordinate_system(const int8_t _new) {
   return true;
 }
 
+int8_t GcodeSuite::get_coordinate_system(){
+  return active_coordinate_system;
+}
+
+void GcodeSuite::set_coordinate_system_offset(int8_t system, AxisEnum axis, float offset){
+  coordinate_system[system][axis] = offset;
+}
+
+/** \addtogroup G-Codes
+ * @{
+ */
+
 /**
- * G53: Apply native workspace to the current move
+ * G53: Apply native workspace to the current move (ONLY FOR iX)
  *
  * In CNC G-code G53 is a modifier.
  * It precedes a movement command (or other modifiers) on the same line.
@@ -76,7 +99,7 @@ void GcodeSuite::G53() {
 }
 
 /**
- * G54-G59.3: Select a new workspace
+ * G54-G59.3: Select a new workspace (ONLY FOR iX)
  *
  * A workspace is an XYZ offset to the machine native space.
  * All workspaces default to 0,0,0 at start, or with EEPROM
@@ -97,5 +120,7 @@ void GcodeSuite::G56() { G54_59(); }
 void GcodeSuite::G57() { G54_59(); }
 void GcodeSuite::G58() { G54_59(); }
 void GcodeSuite::G59() { G54_59(parser.subcode); }
+
+/** @}*/
 
 #endif // CNC_COORDINATE_SYSTEMS

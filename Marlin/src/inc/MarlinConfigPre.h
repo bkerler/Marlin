@@ -34,7 +34,8 @@
 
 #include "../core/boards.h"
 #include "../core/macros.h"
-#include "../../Configuration.h"
+#include "Configuration.h"
+#include <device/board.h>
 
 
 #ifdef CUSTOM_VERSION_FILE
@@ -53,7 +54,7 @@
 #include HAL_PATH(../HAL, inc/Conditionals_LCD.h)
 
 #include "../core/drivers.h"
-#include "../../Configuration_adv.h"
+#include "Configuration_adv.h"
 
 #include "Conditionals_adv.h"
 #include HAL_PATH(../HAL, inc/Conditionals_adv.h)
